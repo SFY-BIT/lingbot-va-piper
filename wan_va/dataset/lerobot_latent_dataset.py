@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from scipy.spatial.transform import Rotation as R
 from lerobot.constants import HF_LEROBOT_HOME
 
+
 def recursive_find_file(directory, filename='info.json'):
     result = []
     try:
@@ -28,34 +29,55 @@ def recursive_find_file(directory, filename='info.json'):
         print(f"Error: {e}")
     return result
 
+
 def construct_lerobot(
     repo_id,
     config,
 ):
-    return LatentLeRobotDataset(
+    print(f"[dataset] construct_lerobot repo_id={repo_id}", flush=True)
+    print(f"[dataset] entering LatentLeRobotDataset repo_id={repo_id}", flush=True)
+    dataset = LatentLeRobotDataset(
         repo_id=repo_id,
         config=config,
     )
+    print(f"[dataset] finished LatentLeRobotDataset repo_id={repo_id}", flush=True)
+    return dataset
 
-def construct_lerobot_multi_processor(config, 
-                                      num_init_worker=8,
-                                      ):
+
+def construct_lerobot_multi_processor(
+    config,
+    num_init_worker=8,
+):
     datasets_out_lst = []
     construct_func = partial(
         construct_lerobot,
         config=config,
     )
+    print(f"[dataset] scanning dataset_path={config.dataset_path}", flush=True)
     repo_list = recursive_find_file(config.dataset_path, 'info.json')
     repo_list = [v.split('/meta/info.json')[0] for v in repo_list]
+    print(f"[dataset] found repos={len(repo_list)}", flush=True)
+    print(f"[dataset] num_init_worker={num_init_worker}", flush=True)
+    print(f"[dataset] repo_list={repo_list}", flush=True)
+
+    if num_init_worker <= 1:
+        for repo_id in repo_list:
+            print(f"[dataset] about to construct repo_id={repo_id}", flush=True)
+            ds = construct_func(repo_id)
+            print(f"[dataset] constructed repo_id={repo_id}", flush=True)
+            datasets_out_lst.append(ds)
+        return datasets_out_lst
+
     with Pool(num_init_worker) as pool:
         datasets_out_lst = pool.map(construct_func, repo_list)
-                
+
     return datasets_out_lst
+
 
 def get_relative_pose(pose):
     if torch.is_tensor(pose):
         pose = pose.detach().cpu().numpy()
-    
+
     rot = R.from_quat(pose[:, 3:7])
     first_rot = R.from_quat(np.tile(pose[:1, 3:7], (pose.shape[0], 1)))
     trans = pose[:, :3]
@@ -67,22 +89,22 @@ def get_relative_pose(pose):
     relative_pose = np.concatenate([relative_trans, relative_quat], axis=1)
     return torch.from_numpy(relative_pose)
 
+
 class MultiLatentLeRobotDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         config,
         num_init_worker=128,
     ):
-        self._datasets = construct_lerobot_multi_processor(config, 
-                                                           num_init_worker, 
-                                                           )
+        self._datasets = construct_lerobot_multi_processor(
+            config,
+            num_init_worker,
+        )
         self.item_id_to_dataset_id, self.acc_dset_num = (
             self._get_item_id_to_dataset_id()
         )
 
-    def __len__(
-        self,
-    ):
+    def __len__(self):
         return sum(len(v) for v in self._datasets)
 
     def _get_item_id_to_dataset_id(self):
@@ -105,12 +127,14 @@ class MultiLatentLeRobotDataset(torch.utils.data.Dataset):
         local_idx = idx - self.acc_dset_num[self.item_id_to_dataset_id[idx]]
         return cur_dset[local_idx]
 
+
 class LatentLeRobotDataset(LeRobotDataset):
     def __init__(
         self,
         repo_id,
         config=None,
     ):
+        print(f"[dataset] building repo={repo_id}", flush=True)
         self.repo_id = repo_id
         self.root = HF_LEROBOT_HOME / repo_id
         self.image_transforms = None
@@ -131,7 +155,7 @@ class LatentLeRobotDataset(LeRobotDataset):
         if self.episodes is not None and self.meta._version >= packaging.version.parse("v2.1"):
             episodes_stats = [self.meta.episodes_stats[ep_idx] for ep_idx in self.episodes]
             self.stats = aggregate_stats(episodes_stats)
-        
+
         try:
             assert all((self.root / fpath).is_file() for fpath in self.get_episodes_file_paths())
             self.hf_dataset = self.load_hf_dataset()
@@ -140,22 +164,33 @@ class LatentLeRobotDataset(LeRobotDataset):
             self.download_episodes(download_videos)
             self.hf_dataset = self.load_hf_dataset()
         self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
-        
+
         self.latent_path = Path(repo_id) / 'latents'
+        print(f"[dataset] loading empty_emb from {config.empty_emb_path}", flush=True)
         self.empty_emb = torch.load(config.empty_emb_path, weights_only=False)
+        print(
+            f"[dataset] loaded empty_emb shape={getattr(self.empty_emb, 'shape', None)}",
+            flush=True,
+        )
         self.config = config
         self.cfg_prob = config.cfg_prob
-        self.used_video_keys = config.obs_cam_keys
+        self.used_video_keys = self._resolve_obs_cam_keys(config.obs_cam_keys)
         self.q01 = np.array(config.norm_stat['q01'], dtype='float')[None]
         self.q99 = np.array(config.norm_stat['q99'], dtype='float')[None]
         self._hf_torch_view = self.hf_dataset.with_format(
-                type='torch',
-                columns=['action'],
-                output_all_columns=False
-            )
+            type='torch',
+            columns=['action'],
+            output_all_columns=False
+        )
+        print(f"[dataset] parsing meta repo={repo_id}", flush=True)
         self.parse_meta()
+        print(f"[dataset] parsed meta repo={repo_id} kept={len(self.new_metas)}", flush=True)
 
     def parse_meta(self):
+        print(
+            f"[dataset] parse_meta start repo={self.repo_id} episodes={len(self.meta.episodes)}",
+            flush=True,
+        )
         out = []
         for key, value in self.meta.episodes.items():
             episode_index = value["episode_index"]
@@ -177,6 +212,54 @@ class LatentLeRobotDataset(LeRobotDataset):
                 if check_statu:
                     out.append(cur_meta)
         self.new_metas = out
+        print(
+            f"[dataset] parse_meta done repo={self.repo_id} kept={len(self.new_metas)}",
+            flush=True,
+        )
+
+    def _get_available_latent_video_keys(self):
+        latent_root = Path(self.latent_path)
+        if not latent_root.exists():
+            return []
+
+        key_set = set()
+        for chunk_dir in latent_root.glob("chunk-*"):
+            if not chunk_dir.is_dir():
+                continue
+            for child in chunk_dir.iterdir():
+                if child.is_dir():
+                    key_set.add(child.name)
+        return sorted(key_set)
+
+    def _resolve_obs_cam_keys(self, requested_keys):
+        requested_keys = list(requested_keys)
+        available_keys = self._get_available_latent_video_keys()
+        if not available_keys:
+            print(
+                f"[dataset] no latent camera directories found under {self.latent_path}, "
+                f"using configured keys={requested_keys}",
+                flush=True,
+            )
+            return requested_keys
+
+        if all(k in available_keys for k in requested_keys):
+            return requested_keys
+
+        fallback_pairs = [
+            ['observation.images.image', 'observation.images.wrist_image'],
+            ['observation.images.one', 'observation.images.two'],
+        ]
+        for pair in fallback_pairs:
+            if all(k in available_keys for k in pair):
+                print(
+                    f"[dataset] obs_cam_keys fallback: configured={requested_keys}, using={pair}",
+                    flush=True,
+                )
+                return pair
+
+        raise ValueError(
+            f"obs_cam_keys mismatch. configured={requested_keys}, available={available_keys}"
+        )
 
     def _check_meta(self, start_frame, end_frame, episode_index):
         episode_chunk = self.meta.get_episode_chunk(episode_index)
@@ -210,32 +293,34 @@ class LatentLeRobotDataset(LeRobotDataset):
         episode_chunk = self.meta.get_episode_chunk(episode_index)
         latent_path = Path(self.latent_path) / f"chunk-{episode_chunk:03d}"
         out = {}
+        load_kwargs = {"weights_only": False}
+        if not torch.cuda.is_available():
+            load_kwargs["map_location"] = "cpu"
         for key in self.used_video_keys:
             cur_path = latent_path / key
             latent_file = (
                 cur_path / f"episode_{episode_index:06d}_{start_frame}_{end_frame}.pth"
             )
             assert os.path.exists(latent_file)
-            latent_data = torch.load(latent_file, weights_only=False)
+            latent_data = torch.load(latent_file, **load_kwargs)
             out[key] = latent_data
-        
+
         return self._flatten_latent_dict(out)
-    
-        
-    def _cat_video_latents(self,
-                           data_dict
-                           ):
+
+    def _cat_video_latents(self, data_dict):
         latent_lst = []
         for key in self.used_video_keys:
-            latent= data_dict[f"{key}.latent"]
+            latent = data_dict[f"{key}.latent"]
             latent_num_frames = data_dict[f"{key}.latent_num_frames"]
             latent_height = data_dict[f"{key}.latent_height"]
             latent_width = data_dict[f"{key}.latent_width"]
-            latent = rearrange(latent, 
-                                 '(f h w) c -> f h w c', 
-                                 f=latent_num_frames, 
-                                 h=latent_height, 
-                                 w=latent_width)
+            latent = rearrange(
+                latent,
+                '(f h w) c -> f h w c',
+                f=latent_num_frames,
+                h=latent_height,
+                w=latent_width,
+            )
             latent_lst.append(latent)
         if self.config.env_type == 'robotwin_tshape':
             wrist_latent = torch.cat(latent_lst[1:], dim=2)
@@ -248,16 +333,16 @@ class LatentLeRobotDataset(LeRobotDataset):
             text_emb = self.empty_emb
 
         out_dict = dict(
-            latents = cat_latent,
-            text_emb = text_emb,
+            latents=cat_latent,
+            text_emb=text_emb,
         )
         return out_dict
-    
+
     def _action_post_process(self, local_start_frame, local_end_frame, latent_frame_ids, action):
         act_shift = int(latent_frame_ids[0] - local_start_frame)
         frame_stride = latent_frame_ids[1] - latent_frame_ids[0]
         action = action[act_shift:]
-        if self.config.env_type == 'robotwin_tshape': ## TODO support get_relative_pose for other dataset, currently only support robotwin 
+        if self.config.env_type == 'robotwin_tshape':
             left_action = get_relative_pose(action[:, :7])
             right_action = get_relative_pose(action[:, 8:15])
             action = np.concatenate([left_action, action[:, 7:8], right_action, action[:, 15:16]], axis=1)
@@ -270,14 +355,20 @@ class LatentLeRobotDataset(LeRobotDataset):
         action_mask = np.ones_like(action, dtype='bool')
         assert action.shape[0] == required_action_num
 
-
         action_paded = np.pad(action, ((0, 0), (0, 1)), mode='constant', constant_values=0)
         action_mask_padded = np.pad(action_mask, ((0, 0), (0, 1)), mode='constant', constant_values=0)
 
         action_aligned = action_paded[:, self.config.inverse_used_action_channel_ids]
         action_mask_aligned = action_mask_padded[:, self.config.inverse_used_action_channel_ids]
         action_aligned = (action_aligned - self.q01) / (
-                self.q99 - self.q01 + 1e-6) * 2. - 1.
+            self.q99 - self.q01 + 1e-6) * 2. - 1.
+
+        action_loss_mask_indices = getattr(self.config, "action_loss_mask_indices", ())
+        for idx in action_loss_mask_indices:
+            if -action_mask_aligned.shape[-1] <= idx < action_mask_aligned.shape[-1]:
+                action_mask_aligned[:, idx] = False
+                action_aligned[:, idx] = 0.0
+
         action_aligned = rearrange(action_aligned, "(f n) c -> c f n 1", f=latent_frame_num)
         action_mask_aligned = rearrange(action_mask_aligned, "(f n) c -> c f n 1", f=latent_frame_num)
         action_aligned *= action_mask_aligned
@@ -302,13 +393,19 @@ class LatentLeRobotDataset(LeRobotDataset):
         ori_data_dict.update(hf_data_frames)
         out_dict = self._cat_video_latents(ori_data_dict)
 
-        out_dict['actions'], out_dict['actions_mask'] = self._action_post_process(local_start_frame, local_end_frame, latent_frame_ids, ori_data_dict['action'])
+        out_dict['actions'], out_dict['actions_mask'] = self._action_post_process(
+            local_start_frame,
+            local_end_frame,
+            latent_frame_ids,
+            ori_data_dict['action'],
+        )
 
         out_dict['latents'] = out_dict['latents'].permute(3, 0, 1, 2)
         return out_dict
 
     def __len__(self):
         return len(self.new_metas)
+
 
 if __name__ == '__main__':
     from wan_va.configs import VA_CONFIGS
@@ -325,18 +422,17 @@ if __name__ == '__main__':
             print(f'{key}: {value}')
     print(len(dset))
     dloader = DataLoader(
-            dset,
-            batch_size=1,
-            shuffle=True,
-            num_workers=32,
-        )
+        dset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=32,
+    )
     max_l = 0
     action_list = []
     for data in tqdm(dloader):
         _, _, F, H, W = data['latents'].shape
-        max_l = max(max_l, F*H*W)
+        max_l = max(max_l, F * H * W)
         action_list.append(data['actions'].flatten(2).permute(0, 2, 1).flatten(0, 1))
     action_all = torch.cat(action_list, dim=0)
     print(max_l)
     print(action_all.shape, action_all.mean(dim=0), action_all.min(dim=0)[0], action_all.max(dim=0)[0])
-    

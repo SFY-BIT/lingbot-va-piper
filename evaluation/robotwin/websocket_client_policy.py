@@ -14,7 +14,10 @@ class WebsocketClientPolicy:
     """
 
     def __init__(self, host: str = "0.0.0.0", port: Optional[int] = None, api_key: Optional[str] = None) -> None:
-        self._uri = f"ws://{host}"
+        if host.startswith("ws"):
+            self._uri = host
+        else:
+            self._uri = f"ws://{host}"
         if port is not None:
             self._uri += f":{port}"
         self._packer = Packer()
@@ -43,19 +46,18 @@ class WebsocketClientPolicy:
         while True:
             try:
                 headers = {"Authorization": f"Api-Key {self._api_key}"} if self._api_key else None
-                # 禁用 ping 机制，防止推理时间过长导致超时
                 conn = websockets.sync.client.connect(
-                    self._uri, 
-                    compression=None, 
-                    max_size=None, 
+                    self._uri,
+                    compression=None,
+                    max_size=None,
                     additional_headers=headers,
-                    ping_interval=None, 
-                    close_timeout=10
+                    ping_interval=None,
+                    ping_timeout=None,
                 )
                 metadata = unpackb(conn.recv())
                 return conn, metadata
-            except (ConnectionRefusedError, Exception) as e:
-                logging.info(f"Still waiting for server... (Error: {e})")
+            except ConnectionRefusedError:
+                logging.info("Still waiting for server...")
                 time.sleep(5)
 
     @override
