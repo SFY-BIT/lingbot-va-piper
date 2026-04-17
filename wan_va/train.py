@@ -3,7 +3,6 @@ import argparse
 import os
 import sys
 from pathlib import Path
-import wandb
 
 import torch
 import torch.distributed as dist
@@ -50,6 +49,7 @@ import gc
 class Trainer:
     def __init__(self, config):
         if config.enable_wandb and config.rank == 0:
+            import wandb
             wandb.login(host=os.environ['WANDB_BASE_URL'], key=os.environ['WANDB_API_KEY'])
             self.wandb = wandb
             self.wandb.init(
@@ -118,7 +118,10 @@ class Trainer:
 
         # Setup dataloaders
         logger.info("Setting up datasets...")
-        train_dataset = MultiLatentLeRobotDataset(config=config)
+        train_dataset = MultiLatentLeRobotDataset(
+            config=config,
+            num_init_worker=getattr(config, "num_init_worker", 1),
+        )
         train_sampler = DistributedSampler(
             train_dataset,
             num_replicas=config.world_size,
@@ -241,8 +244,16 @@ class Trainer:
         input_dict = {
             'latent_dict': latent_dict,
             'action_dict': action_dict,
-            'chunk_size': torch.randint(1, 5, (1,)).item(),
-            'window_size': torch.randint(4, 65, (1,)).item(),
+            'chunk_size': getattr(
+                self.config,
+                'train_chunk_size',
+                torch.randint(1, 5, (1,)).item(),
+            ),
+            'window_size': getattr(
+                self.config,
+                'train_window_size',
+                torch.randint(4, 65, (1,)).item(),
+            ),
         }
         return input_dict
 
@@ -297,13 +308,15 @@ class Trainer:
         """Train a single batch, returns losses for logging."""
         batch = self.convert_input_format(batch)
         input_dict = self._prepare_input_dict(batch)
+        no_optimizer_step = getattr(self.config, 'no_optimizer_step', False)
         
         should_sync = (batch_idx + 1) % self.gradient_accumulation_steps == 0
         
-        if not should_sync:
-            self.transformer.set_requires_gradient_sync(False)
-        else:
-            self.transformer.set_requires_gradient_sync(True)
+        if hasattr(self.transformer, "set_requires_gradient_sync"):
+            if not should_sync:
+                self.transformer.set_requires_gradient_sync(False)
+            else:
+                self.transformer.set_requires_gradient_sync(True)
 
         output = self.transformer(input_dict, train_mode=True)
         latent_loss, action_loss = self.compute_loss(input_dict, output)
@@ -316,11 +329,13 @@ class Trainer:
         # Only update weights after accumulating gradients
         if should_sync:
             total_norm = torch.nn.utils.clip_grad_norm_(self.transformer.parameters(), 2.0)
-            self.optimizer.step()
-            self.lr_scheduler.step()
+            if not no_optimizer_step:
+                self.optimizer.step()
+                self.lr_scheduler.step()
             self.optimizer.zero_grad()
             
             losses['total_norm'] = total_norm
+            losses['no_optimizer_step'] = no_optimizer_step
             losses['should_log'] = True
         else:
             losses['should_log'] = False

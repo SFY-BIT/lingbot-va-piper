@@ -1,5 +1,7 @@
 <h1 align="center">LingBot-VA: Causal World Modeling for Robot Control</h1>
 
+<p align="center">[<a href="README_zh.md">中文文档</a>]</p>
+
 <p align="center">
   <a href="https://arxiv.org/abs/2601.21998"><img src="https://img.shields.io/static/v1?label=Paper&message=PDF&color=red&logo=arxiv"></a>
   <a href="https://technology.robbyant.com/lingbot-va"><img src="https://img.shields.io/badge/Project-Website-blue"></a>

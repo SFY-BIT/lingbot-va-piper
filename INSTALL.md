@@ -1,5 +1,7 @@
 # Installation Guide
 
+[中文文档](INSTALL_zh.md)
+
 ## Install with pip
 
 ```bash
